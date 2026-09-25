@@ -38,7 +38,8 @@ build:
     #!/bin/bash
     set -euo pipefail
     KEY="{{keys_dir}}/sb-db.key"
-    CERT="keys/db.crt"
+    CERT_DIR="keys"
+    CERT="${CERT_DIR}/db.crt"
     case "{{base}}" in
         rhel|centos-stream) ;;
         *) echo "error: unknown base '{{base}}' (use rhel or centos-stream)" >&2; exit 1 ;;
@@ -54,14 +55,20 @@ build:
         openssl req -x509 -newkey rsa:2048 -nodes \
             -keyout "${KEY}" -out "${CERT}" \
             -days 1 -subj '/CN=bootc-ci-ephemeral/'
+    elif [ ! -f "${CERT}" ]; then
+        echo "error: ${KEY} exists but ${CERT} does not; add the matching db certificate (just keygen writes both)" >&2
+        exit 1
     fi
 
     # build-rootfs runs `rpm-ostree compose` under bwrap, which needs extra
     # capabilities and /dev/fuse. The composefs/UKI build also uses fuse.
+    # The certificate goes in as a build context (keys/ holds no private
+    # keys), so that the layer cache notices when it changes; see the
+    # Containerfile.
     podman build "${build_args[@]}" \
         --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
         --secret id=secureboot_key,src="${KEY}" \
-        --secret id=secureboot_cert,src="${CERT}" \
+        --build-context secureboot="${CERT_DIR}" \
         -t "{{host_image}}" .
     echo "Host image built: {{host_image}}"
 

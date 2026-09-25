@@ -22,10 +22,14 @@
 # Only `systemd-boot-unsigned` (the boot loader binary that must be present at
 # install time) is installed into the sealed tree.
 #
-# Both the db private key and the db certificate are passed as build
-# secrets.  The cert is public, but using a secret mount avoids SELinux
-# label mismatches on bind-mounted host files and keeps the cert out of
-# any image layer.
+# The db private key is passed as a build secret, and only the signing
+# steps (in `sdboot-signed` and `sealer`, run with `--network=none`) mount it.
+# The public db certificate comes from the `secureboot` build context (the
+# keys/ directory, which holds no private keys) and is copied into those
+# stages. Build secrets aren't part of the layer cache key, but copied files
+# are: that is what makes the signing steps rerun when the key changes,
+# instead of reusing signatures made with an old key from the cache. The
+# certificate never lands in the sealed tree.
 #
 # NOTE: `build-rootfs` runs `rpm-ostree compose` under bwrap and therefore
 # needs extra capabilities at build time. The Justfile `build` recipe passes
@@ -35,7 +39,7 @@
 #   podman build \
 #     --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
 #     --secret id=secureboot_key,src=target/keys/sb-db.key \
-#     --secret id=secureboot_cert,src=keys/db.crt \
+#     --build-context secureboot=keys \
 #     -t localhost/sealed-host:latest .
 
 # quay.io/centos-bootc/centos-bootc:stream10 also works and needs no
@@ -129,13 +133,32 @@ dnf clean all
 EORUN
 
 # ---------------------------------------------------------------------------
-# Stage: penultimate — local config + sign systemd-boot + scrub /var
+# Stage: sdboot-signed — sign systemd-boot with our Secure Boot db key
+# ---------------------------------------------------------------------------
+# Signing happens outside the sealed tree so that the certificate copied in
+# below (see the header comment) doesn't end up in it. systemd-boot is copied
+# rather than bind-mounted so that a new systemd-boot reliably invalidates the
+# cache too (see the buildah note on base-rootfs above).
+FROM tools AS sdboot-signed
+COPY --from=secureboot db.crt /secureboot/db.crt
+COPY --from=base-rootfs /usr/lib/systemd/boot/efi/systemd-bootx64.efi /in/
+RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
+    --mount=type=secret,id=secureboot_key <<EORUN
+set -xeuo pipefail
+sha256sum /secureboot/db.crt
+mkdir -p /out
+/usr/lib/systemd/systemd-sbsign sign \
+    --private-key /run/secrets/secureboot_key \
+    --certificate /secureboot/db.crt \
+    --output /out/systemd-bootx64.efi \
+    /in/systemd-bootx64.efi
+EORUN
+
+# ---------------------------------------------------------------------------
+# Stage: penultimate — local config + signed systemd-boot + scrub /var
 # ---------------------------------------------------------------------------
 # This stage produces the exact filesystem tree that will be sealed, EXCEPT for
 # the /boot UKI which is added in the final stage from the sealer's digest.
-#
-# sbsign is invoked from the `tools` bind-mount rather than installed here,
-# so the signing binary never becomes part of the sealed tree.
 FROM base-rootfs AS penultimate
 
 # composefs needs fs-verity, which on the root fs means ext4 here. Default to ext4
@@ -149,21 +172,10 @@ type = "ext4"
 EOF
 EORUN
 
-# Sign systemd-boot with our Secure Boot key so UEFI firmware will load it.
-# MUST happen before the seal so the signed binary is part of the digest.
-# systemd-sbsign is part of the base systemd package (v257+) so it is already
-# present in the target rootfs — no bind-mounts or extra tools needed.
-RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    --mount=type=secret,id=secureboot_key \
-    --mount=type=secret,id=secureboot_cert <<EORUN
-set -xeuo pipefail
-/usr/lib/systemd/systemd-sbsign sign \
-    --private-key /run/secrets/secureboot_key \
-    --certificate /run/secrets/secureboot_cert \
-    --output /tmp/systemd-bootx64.efi.signed \
-    /usr/lib/systemd/boot/efi/systemd-bootx64.efi
-mv /tmp/systemd-bootx64.efi.signed /usr/lib/systemd/boot/efi/systemd-bootx64.efi
-EORUN
+# Replace systemd-boot with the copy signed with our Secure Boot key, so UEFI
+# firmware will load it. MUST happen before the seal so the signed binary is
+# part of the digest.
+COPY --from=sdboot-signed /out/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi
 
 # Scrub the dnf/rpm bookkeeping the post-copy install left in /var so the tree
 # is "effectively empty" at seal time and the bootc var-tmpfiles lint (run
@@ -181,14 +193,15 @@ RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp
 # FROM tools so ukify, sbsign, and all their deps are natively available.
 # The penultimate tree is mounted read-only; the sealer never modifies it.
 FROM tools AS sealer
+COPY --from=secureboot db.crt /secureboot/db.crt
 # The UKI is written straight to its final /boot location, keyed by the
 # kernel version that split-kernel-and-rootfs used for its directory.
 RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=bind,from=penultimate,target=/target \
     --mount=type=bind,from=target-base,source=/kernel,target=/run/kernel \
-    --mount=type=secret,id=secureboot_key \
-    --mount=type=secret,id=secureboot_cert <<EORUN
+    --mount=type=secret,id=secureboot_key <<EORUN
 set -xeuo pipefail
+sha256sum /secureboot/db.crt
 kver=$(ls /run/kernel)
 mkdir -p /out/boot/EFI/Linux
 bootc container ukify --rootfs /target --kernel-dir "/run/kernel/${kver}" \
@@ -198,7 +211,7 @@ bootc container ukify --rootfs /target --kernel-dir "/run/kernel/${kver}" \
   -- \
   --signtool systemd-sbsign \
   --secureboot-private-key /run/secrets/secureboot_key \
-  --secureboot-certificate /run/secrets/secureboot_cert \
+  --secureboot-certificate /secureboot/db.crt \
   --no-sign-kernel \
   --output "/out/boot/EFI/Linux/${kver}.efi"
 ls -lh /out/boot/EFI/Linux/
