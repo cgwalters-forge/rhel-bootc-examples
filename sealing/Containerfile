@@ -72,6 +72,11 @@ for key in pathlib.Path("/etc/pki/rpm-gpg").glob("RPM-GPG-KEY-*"):
 EOF
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     /usr/libexec/bootc-base-imagectl build-rootfs --manifest=standard /target-rootfs
+# Move the kernel and initramfs out of the target rootfs into /kernel/<kver>/.
+# The sealer builds the UKI from them, so the sealed image carries the kernel
+# only inside the signed UKI, not also as a second copy in /usr/lib/modules.
+RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
+    bootc container split-kernel-and-rootfs --rootfs /target-rootfs --output /kernel
 
 # ---------------------------------------------------------------------------
 # Stage: boot-rpms — download the bootloader RPM that belongs in the final image
@@ -176,13 +181,17 @@ RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp
 # FROM tools so ukify, sbsign, and all their deps are natively available.
 # The penultimate tree is mounted read-only; the sealer never modifies it.
 FROM tools AS sealer
+# The UKI is written straight to its final /boot location, keyed by the
+# kernel version that split-kernel-and-rootfs used for its directory.
 RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     --mount=type=bind,from=penultimate,target=/target \
+    --mount=type=bind,from=target-base,source=/kernel,target=/run/kernel \
     --mount=type=secret,id=secureboot_key \
     --mount=type=secret,id=secureboot_cert <<EORUN
 set -xeuo pipefail
-mkdir -p /out
-bootc container ukify --rootfs /target \
+kver=$(ls /run/kernel)
+mkdir -p /out/boot/EFI/Linux
+bootc container ukify --rootfs /target --kernel-dir "/run/kernel/${kver}" \
   --karg rw \
   --karg console=hvc0,115200 \
   --karg systemd.journald.forward_to_console=1 \
@@ -191,18 +200,8 @@ bootc container ukify --rootfs /target \
   --secureboot-private-key /run/secrets/secureboot_key \
   --secureboot-certificate /run/secrets/secureboot_cert \
   --no-sign-kernel \
-  --output /out/uki.efi
-ls -lh /out/
-EORUN
-
-# Place the UKI at its final /boot location, keyed by kernel version.
-# Read kver from the sealed tree rather than the tools image to avoid coupling.
-RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    --mount=type=bind,from=penultimate,target=/target <<EORUN
-set -xeuo pipefail
-kver=$(ls /target/usr/lib/modules)
-mkdir -p /out/boot/EFI/Linux
-mv /out/uki.efi "/out/boot/EFI/Linux/${kver}.efi"
+  --output "/out/boot/EFI/Linux/${kver}.efi"
+ls -lh /out/boot/EFI/Linux/
 EORUN
 
 # Run the linter against the sealed tree.
