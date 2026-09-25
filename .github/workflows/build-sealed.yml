@@ -70,15 +70,20 @@ jobs:
           SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
         run: echo "${SOURCE_REGISTRY_PASSWORD}" | podman login registry.redhat.io -u "${SOURCE_REGISTRY_USER}" --password-stdin
 
-      # For push builds with a real key, place it where the Justfile expects it.
-      # For PRs (no secret) the Justfile generates an ephemeral key+cert itself.
-      - name: Write db private key (push builds only)
-        if: env.SECUREBOOT_DB_KEY != ''
+      # For non-PR builds with a real key, place it where the Justfile expects
+      # it. Otherwise the Justfile generates an ephemeral key+cert itself.
+      # (A step's `if:` can't see its own `env:`, so the check is in the script.)
+      - name: Write db private key (non-PR builds only)
+        if: github.event_name != 'pull_request'
         env:
           SECUREBOOT_DB_KEY: ${{ secrets.SECUREBOOT_DB_KEY }}
         run: |
-          mkdir -p target/keys
-          printenv SECUREBOOT_DB_KEY > target/keys/sb-db.key
+          if [ -z "${SECUREBOOT_DB_KEY}" ]; then
+            echo "SECUREBOOT_DB_KEY is not set; building with an ephemeral key"
+          else
+            mkdir -p target/keys
+            printenv SECUREBOOT_DB_KEY > target/keys/sb-db.key
+          fi
 
       - name: Build sealed host image
         run: just base=${{ steps.rhel.outputs.base }} build
