@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [main, dev]
+  # Weekly, so that base image tags going stale are noticed.
+  schedule:
+    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 concurrency:
@@ -13,11 +16,29 @@ concurrency:
 
 jobs:
   discover:
+    # Only run the scheduled build upstream, not in forks.
+    if: github.event_name != 'schedule' || github.repository_owner == 'redhat-cop'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      rhel: ${{ steps.rhel.outputs.available }}
     steps:
       - uses: actions/checkout@v4
+
+      # Secrets are not passed to workflows triggered by PRs from forks,
+      # and every example needs RHEL content, so skip the builds there.
+      - name: Check for RHEL subscription secrets
+        id: rhel
+        env:
+          RHT_ACT_KEY: ${{ secrets.RHT_ACT_KEY }}
+          SOURCE_REGISTRY_USER: ${{ secrets.SOURCE_REGISTRY_USER }}
+        run: |
+          if [ -n "${RHT_ACT_KEY}" ] && [ -n "${SOURCE_REGISTRY_USER}" ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::RHEL subscription secrets are unavailable (e.g. a PR from a fork); skipping the example builds"
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Find changed examples (PR only)
         if: github.event_name == 'pull_request'
@@ -38,7 +59,7 @@ jobs:
           set -euo pipefail
 
           # Collect all examples (top-level dirs with a Containerfile),
-          # excluding sealing (uses CentOS Stream, handled by its own workflow)
+          # excluding sealing (built by build-sealed.yml)
           all=()
           for d in */; do
             name="${d%/}"
@@ -68,7 +89,7 @@ jobs:
 
   build:
     needs: discover
-    if: needs.discover.outputs.matrix != '[]'
+    if: needs.discover.outputs.matrix != '[]' && needs.discover.outputs.rhel == 'true'
     strategy:
       fail-fast: false
       matrix:
