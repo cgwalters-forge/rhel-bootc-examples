@@ -59,12 +59,13 @@ jobs:
           set -euo pipefail
 
           # Collect all examples (top-level dirs with a Containerfile),
-          # excluding sealing (built by build-sealed.yml)
+          # excluding sealing (built by build-sealed.yml) and bootc-git (not
+          # an example, but used by the composefs examples)
           all=()
           for d in */; do
             name="${d%/}"
             [ -f "$d/Containerfile" ] || continue
-            [ "$name" = "sealing" ] && continue
+            case "$name" in sealing|bootc-git) continue ;; esac
             all+=("$name")
           done
 
