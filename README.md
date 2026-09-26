@@ -81,6 +81,8 @@ currently remain on `rhel9/rhel-bootc:9.4` pending RHEL 10 package availability.
   signed Unified Kernel Image embeds the composefs digest of the root filesystem.
   UEFI Secure Boot verifies the UKI, which in turn verifies every file on the
   root via fs-verity. *Note: experimental.*
+- [composefs](composefs) - The bootc composefs backend without sealing: a
+  regular boot chain, with deployments stored in composefs. *Note: experimental.*
 
 ## More examples
 
