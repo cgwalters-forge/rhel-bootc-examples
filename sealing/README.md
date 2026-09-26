@@ -49,6 +49,15 @@ that computes the composefs digest:
 BOOTC_RPMS=$(just ../bootc-rpms) just base=centos-stream bcvk-ssh
 ```
 
+`just e2e sealed` at the top level also turns the image into a qcow2 with
+image-builder, boots it with Secure Boot, and switches and upgrades it to
+newer builds (see [../tests/composefs_e2e.py](../tests/composefs_e2e.py)).
+That needs an image-builder with
+[osbuild/image-builder#2719](https://github.com/osbuild/image-builder/pull/2719),
+which is merged but not released yet (it is newer than v84): build one from
+image-builder's main and pass it as `IB_IMAGE`. Released image-builder gives the root partition a generic type,
+and the UKI then doesn't find it.
+
 ### 3. Manual exploration
 
 The `Justfile` is a relatively straightforward wrapper for `podman build` to generate the container image, and `bcvk` to run it as a local VM.

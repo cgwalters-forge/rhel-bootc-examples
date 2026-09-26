@@ -83,6 +83,11 @@ build:
         -t "{{host_image}}" .
     echo "Host image built: {{host_image}}"
 
+# Show the built image's bootc version and lint it.
+lint:
+    podman run --rm {{host_image}} rpm -q bootc
+    podman run --rm --network=none {{host_image}} bootc container lint --fatal-warnings
+
 # Internal: boot the VM (used by bcvk-ssh and bcvk-test).
 [private]
 bcvk-boot: build
