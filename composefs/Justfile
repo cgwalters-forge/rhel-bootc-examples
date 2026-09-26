@@ -1,0 +1,61 @@
+# Justfile for the unsealed composefs backend example
+#
+# Prerequisites: podman, just; for VM testing: bcvk (from bootc-dev/bcvk)
+
+host_image := env("HOST_IMAGE", "localhost/composefs-host:latest")
+vm_name := "composefs-demo"
+
+# What to build from: "rhel" (the default; needs a RHEL subscription and a
+# registry.redhat.io login) or "centos-stream" (CentOS Stream 10, no
+# subscription), e.g. `just base=centos-stream build`. BASE_IMAGE, if set,
+# overrides it with any image.
+base := "rhel"
+# Empty means the Containerfile's default, RHEL
+base_image := env("BASE_IMAGE", if base == "centos-stream" { "quay.io/centos-bootc/centos-bootc:stream10" } else { "" })
+
+# Build the image from `base` (see above). Set
+# BOOTC_RPMS to use bootc built from git (see ../bootc-git),
+# EXTRA_PACKAGES to add packages, and COMPOSEFS_BACKEND_CONFIG=1 to select the
+# composefs backend in the image's install configuration (see the Containerfile).
+build:
+    #!/bin/bash
+    set -euo pipefail
+    case "{{base}}" in
+        rhel|centos-stream) ;;
+        *) echo "error: unknown base '{{base}}' (use rhel or centos-stream)" >&2; exit 1 ;;
+    esac
+    build_args=()
+    if [ -n "{{base_image}}" ]; then
+        build_args+=(--build-arg "base={{base_image}}")
+    fi
+    if [ -n "${BOOTC_RPMS:-}" ]; then
+        build_args+=(--build-arg "bootc_rpms=${BOOTC_RPMS}")
+    fi
+    if [ -n "${EXTRA_PACKAGES:-}" ]; then
+        build_args+=(--build-arg "extra_packages=${EXTRA_PACKAGES}")
+    fi
+    if [ -n "${COMPOSEFS_BACKEND_CONFIG:-}" ]; then
+        build_args+=(--build-arg "composefs_backend_config=${COMPOSEFS_BACKEND_CONFIG}")
+    fi
+    # build-rootfs runs `rpm-ostree compose` under bwrap, which needs extra
+    # capabilities and /dev/fuse.
+    podman build "${build_args[@]}" \
+        --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
+        -t "{{host_image}}" .
+
+# Install the image with the composefs backend in a VM, check it, and tear down.
+bcvk-test: build
+    #!/bin/bash
+    set -euo pipefail
+    trap 'bcvk libvirt rm --stop --force "{{vm_name}}"' EXIT
+    bcvk libvirt run --replace --name "{{vm_name}}" --ssh-wait \
+        --composefs-backend --filesystem=ext4 --firmware=uefi-insecure \
+        "{{host_image}}"
+    bcvk libvirt ssh "{{vm_name}}" -- bash -c '
+        set -euo pipefail
+        findmnt /
+        findmnt -n -o OPTIONS / | grep -q verity
+        bootc status
+        bootc status --json | python3 -c "import json, sys; assert json.load(sys.stdin)[\"status\"][\"booted\"][\"composefs\"]"
+        echo "=== COMPOSEFS BOOT VERIFIED ==="
+    '
