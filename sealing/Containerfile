@@ -51,6 +51,11 @@ ARG extra_packages=""
 # Kernel console argument(s) baked into the UKI.
 # Override for different platforms, e.g. --build-arg console_kargs="console=ttyS0,115200"
 ARG console_kargs="console=hvc0,115200"
+# Optionally, an image with bootc RPMs built from git (see ../bootc-git) that
+# replace the distribution's bootc, in the sealed tree and in the tools that
+# build the UKI; the Justfile passes $BOOTC_RPMS here when set.
+ARG bootc_rpms=scratch
+FROM ${bootc_rpms} AS bootc-rpms
 FROM ${base} as base
 
 # ---------------------------------------------------------------------------
@@ -81,14 +86,27 @@ for key in pathlib.Path("/etc/pki/rpm-gpg").glob("RPM-GPG-KEY-*"):
     for i, block in enumerate(blocks):
         key.with_name(f"{key.name}-{i}").write_text(block + "\n")
 EOF
+# Declared here so that its value is part of the cache key of the RUN below:
+# buildah doesn't notice when a bind-mounted stage changes.
+ARG bootc_rpms
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    /usr/libexec/bootc-base-imagectl build-rootfs --manifest=standard \
-    ${extra_packages:+--install $extra_packages} /target-rootfs
+    --mount=type=bind,from=bootc-rpms,target=/run/bootc-rpms <<EORUN
+set -xeuo pipefail
+# bootc RPMs from bootc_rpms, if any, take precedence over the distribution's.
+if test -d /run/bootc-rpms/repodata; then
+  cp /run/bootc-rpms/bootc-git.repo /etc/yum.repos.d/
+fi
+install_args=()
+for pkg in ${extra_packages}; do install_args+=(--install "${pkg}"); done
+/usr/libexec/bootc-base-imagectl build-rootfs "${install_args[@]}" --manifest=standard /target-rootfs
+rm -f /etc/yum.repos.d/bootc-git.repo
+EORUN
 # Move the kernel and initramfs out of the target rootfs into /kernel/<kver>/.
 # The sealer builds the UKI from them, so the sealed image carries the kernel
 # only inside the signed UKI, not also as a second copy in /usr/lib/modules.
+# This uses the target's own bootc, which may be newer than the builder's.
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    bootc container split-kernel-and-rootfs --rootfs /target-rootfs --output /kernel
+    /target-rootfs/usr/bin/bootc container split-kernel-and-rootfs --rootfs /target-rootfs --output /kernel
 
 # ---------------------------------------------------------------------------
 # Stage: boot-rpms — download the bootloader RPM that belongs in the final image
@@ -108,10 +126,24 @@ RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
 # It is installed here from the RHEL 10 appstream repo — no EPEL or CRB
 # required. systemd-sbsign (part of systemd v257, already in the base image)
 # is used for all PE signing and is available everywhere without extra repos.
+#
+# bootc computes the composefs digest for the UKI here, so it must be the same
+# bootc as in the sealed tree: with bootc_rpms, it's upgraded from there too.
 FROM base AS tools
+# Declared here so that its value is part of the cache key of the RUN below:
+# buildah doesn't notice when a bind-mounted stage changes.
+ARG bootc_rpms
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
-    dnf -y install systemd-ukify && \
-    dnf clean all
+    --mount=type=bind,from=bootc-rpms,target=/run/bootc-rpms <<EORUN
+set -xeuo pipefail
+if test -d /run/bootc-rpms/repodata; then
+  cp /run/bootc-rpms/bootc-git.repo /etc/yum.repos.d/
+fi
+dnf -y install systemd-ukify
+dnf -y upgrade bootc
+rm -f /etc/yum.repos.d/bootc-git.repo
+dnf clean all
+EORUN
 
 # ---------------------------------------------------------------------------
 # Stage: base-rootfs — clean rootfs + offline install of systemd-boot-unsigned
@@ -203,6 +235,11 @@ RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp
 FROM tools AS sealer
 COPY --from=secureboot db.crt /secureboot/db.crt
 ARG console_kargs
+# Declared here so that its value is part of the cache key of the RUN below:
+# buildah doesn't notice when the bind-mounted penultimate stage changes, and
+# would otherwise reuse a UKI sealed for another package set (seen with
+# buildah 1.43.2).
+ARG extra_packages
 # The UKI is written straight to its final /boot location, keyed by the
 # kernel version that split-kernel-and-rootfs used for its directory.
 RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \

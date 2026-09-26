@@ -9,7 +9,7 @@
 #                  See README-AWS.md for full details.
 
 # Local image name
-host_image := "localhost/sealed-host:latest"
+host_image := env("HOST_IMAGE", "localhost/sealed-host:latest")
 
 # What to build from: "rhel" (the default; needs a RHEL subscription and a
 # registry.redhat.io login) or "centos-stream" (CentOS Stream 10, no
@@ -35,7 +35,9 @@ keygen:
 # Build the sealed host image (composefs backend with signed UKI).
 # If no persistent key exists under target/keys/, an ephemeral key+cert pair
 # is generated automatically (suitable for CI and local smoke-testing).
-# See `base` above for building without a RHEL subscription.
+# See `base` above for building without a RHEL subscription. Set BOOTC_RPMS
+# to use bootc built from git (see ../bootc-git), EXTRA_PACKAGES to add
+# packages, and HOST_IMAGE to tag the result differently.
 build:
     #!/bin/bash
     set -euo pipefail
@@ -49,6 +51,13 @@ build:
     build_args=()
     if [ -n "{{base_image}}" ]; then
         build_args+=(--build-arg "base={{base_image}}")
+    fi
+    # bootc RPMs built from git, e.g. BOOTC_RPMS=$(just ../bootc-rpms)
+    if [ -n "${BOOTC_RPMS:-}" ]; then
+        build_args+=(--build-arg "bootc_rpms=${BOOTC_RPMS}")
+    fi
+    if [ -n "${EXTRA_PACKAGES:-}" ]; then
+        build_args+=(--build-arg "extra_packages=${EXTRA_PACKAGES}")
     fi
 
     if [ ! -f "${KEY}" ]; then
