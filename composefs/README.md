@@ -49,3 +49,8 @@ To try unreleased bootc changes, build bootc RPMs from git first (see
 ```sh
 BOOTC_RPMS=$(just ../bootc-rpms) just build
 ```
+
+`just e2e unsealed` at the top level does all of this on CentOS Stream 10
+and also builds a qcow2 with image-builder, boots it, and switches and
+upgrades it to newer builds. Because of the missing pieces listed under
+"Disk images", it can't pass with the pinned bootc yet.

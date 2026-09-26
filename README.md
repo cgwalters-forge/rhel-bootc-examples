@@ -84,6 +84,11 @@ currently remain on `rhel9/rhel-bootc:9.4` pending RHEL 10 package availability.
 - [composefs](composefs) - The bootc composefs backend without sealing: a
   regular boot chain, with deployments stored in composefs. *Note: experimental.*
 
+The composefs examples can be built with bootc from git, to try unreleased
+changes: see [bootc-git](bootc-git/Containerfile), and `just e2e sealed` or
+`just e2e unsealed` for an end-to-end test on CentOS Stream 10 that builds a
+disk image with image-builder, boots it, and upgrades it.
+
 ## More examples
 
 There are more community-contributed examples available in the [upstream Fedora-bootc project](https://gitlab.com/fedora/bootc/examples).
