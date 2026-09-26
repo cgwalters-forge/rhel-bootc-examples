@@ -1,0 +1,75 @@
+name: Build composefs examples with bootc from git
+
+# Builds the composefs examples (sealing and composefs) on CentOS Stream 10
+# with bootc built from the commit pinned in bootc-git/commit, and lints the
+# results. Booting them from a disk image made by image-builder needs KVM and
+# is covered by `just e2e sealed|unsealed` (tests/composefs_e2e.py), which is
+# run by hand.
+
+on:
+  pull_request:
+    paths:
+      - 'bootc-git/**'
+      - 'composefs/**'
+      - 'sealing/**'
+      - 'tests/**'
+      - 'Justfile'
+      - '.github/workflows/build-composefs-git.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bootc-git/**'
+      - 'composefs/**'
+      - 'sealing/**'
+      - 'tests/**'
+      - 'Justfile'
+      - '.github/workflows/build-composefs-git.yml'
+  # Weekly, so that breakage from new CentOS Stream content is noticed: the
+  # example base images float on purpose (unlike the bootc buildroot).
+  schedule:
+    - cron: '47 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Only run the scheduled build upstream, not in forks.
+    if: github.event_name != 'schedule' || github.repository_owner == 'redhat-cop'
+    name: Build and lint
+    runs-on: ubuntu-latest
+    container:
+      image: registry.access.redhat.com/ubi10/ubi
+      options: --privileged --volume /var
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+          dnf -y install podman just openssl
+
+      - name: Build bootc RPMs from git
+        # Not inside echo, which would hide a failed build: the examples
+        # would then silently use the distribution's bootc.
+        run: |
+          rpms=$(just bootc-rpms)
+          echo "BOOTC_RPMS=${rpms}" >> "${GITHUB_ENV}"
+
+      - name: Build and lint the sealed example
+        run: |
+          just base=centos-stream build sealing
+          just lint sealing
+
+      - name: Build and lint the unsealed composefs example
+        run: |
+          just base=centos-stream build composefs
+          just lint composefs
+
+      - name: Clean up keys
+        if: always()
+        run: rm -rf sealing/target/keys
