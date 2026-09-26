@@ -87,7 +87,11 @@ currently remain on `rhel9/rhel-bootc:9.4` pending RHEL 10 package availability.
 The composefs examples can be built with bootc from git, to try unreleased
 changes: see [bootc-git](bootc-git/Containerfile), and `just e2e sealed` or
 `just e2e unsealed` for an end-to-end test on CentOS Stream 10 that builds a
-disk image with image-builder, boots it, and upgrades it.
+disk image with image-builder, boots it, and upgrades it. The bootc commit
+and the image it's compiled in are pinned (see `just bootc-git-bump`; when
+the registry has dropped the pinned image, the build warns and uses its tag), but
+the base images of the examples are not, on purpose: a weekly CI job builds
+them with bootc from git to catch breakage from new CentOS Stream content.
 
 ## More examples
 
