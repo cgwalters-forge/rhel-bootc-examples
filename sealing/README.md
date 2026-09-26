@@ -134,3 +134,20 @@ For CI, set one GitHub Actions secret:
 | `SECUREBOOT_DB_KEY` | Secure Boot db private key (PEM) |
 
 PR builds use ephemeral keys so no secrets are needed for CI validation.
+
+## Caveats
+
+- A sealed image is a leaf: rebuilding anything on top of it without the db
+  key gives an unsigned UKI, which the firmware refuses to boot. Derive from
+  the stages before sealing instead, and seal again.
+- Don't rechunk the image after sealing. Rechunking tools normalize file
+  timestamps, which are part of the composefs digest in the UKI, so the
+  system wouldn't boot. Rechunk before sealing, or not at all.
+- Disk images from image-builder or bootc-image-builder can't be customized
+  (users, kernel arguments, files): the UKI is installed as built. Put
+  configuration in the image itself, or use systemd credentials.
+- A disk image from image-builder or bootc-image-builder records the image
+  reference it was built from (often a local one such as
+  `localhost/sealed-host:latest`) as the one to update from, so `bootc
+  upgrade` fails on a fresh install. Run `bootc switch <registry>/<image>`
+  once first.
