@@ -33,6 +33,11 @@ just bcvk-ssh
 
 This single command builds the sealed container image and boots a VM with Secure Boot and the composefs backend.
 
+Building from the RHEL base image needs a subscribed host and a login to
+registry.redhat.io. To try it without one, build against CentOS Stream 10
+instead with `just base=centos-stream bcvk-ssh` (or any other base image with
+`BASE_IMAGE=...`).
+
 ### 3. Manual exploration
 
 The `Justfile` is a relatively straightforward wrapper for `podman build` to generate the container image, and `bcvk` to run it as a local VM.
@@ -71,12 +76,13 @@ Build time
 │     ├── Install packages (systemd-boot, sbsigntools, systemd-ukify)
 │     ├── Sign systemd-boot with db key (secret: db.key, public: keys/db.crt)
 │     ├── Rebuild initramfs with bootc dracut module
+│     ├── Move kernel + initramfs out of the rootfs (bootc container split-kernel-and-rootfs)
 │     └── FROM scratch flatten (deterministic composefs digest)
-├── bootc container ukify
+├── bootc container ukify --kernel-dir
 │     ├── Compute composefs SHA-512 digest from flattened rootfs
 │     ├── Embed digest + kargs in UKI command line
 │     └── Sign UKI with db key
-└── COPY --from=kernel /boot /boot
+└── COPY the UKI to /boot/EFI/Linux/<kver>.efi (the image's only copy of the kernel)
 
 Boot time (UEFI → systemd-boot → UKI → composefs)
 ├── UEFI verifies systemd-boot signature against enrolled db cert
