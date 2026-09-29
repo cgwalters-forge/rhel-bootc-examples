@@ -1,0 +1,88 @@
+# Containerfile — bootc host for the composefs backend (unsealed)
+#
+# A regular bootc image (kernel + initramfs, GRUB via bootupd) meant to be
+# installed with bootc's composefs backend instead of ostree. Unlike
+# ../sealing, nothing is signed and the root filesystem isn't bound to the
+# boot chain: composefs and fs-verity are used for storage and integrity of
+# the deployed images, not for verified boot.
+#
+# Like ../sealing, the root is rebuilt with `bootc-base-imagectl build-rootfs`
+# and copied FROM scratch. That drops the base image's ostree content, which
+# the composefs backend doesn't use.
+#
+# Build (see the Justfile):
+#   podman build \
+#     --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
+#     -t localhost/composefs-host:latest .
+
+# quay.io/centos-bootc/centos-bootc:stream10 also works and needs no
+# subscription: `just base=centos-stream build` passes it here.
+ARG base=registry.redhat.io/rhel10/rhel-bootc:10.2
+# Optionally, an image with bootc RPMs built from git (see ../bootc-git) that
+# replace the distribution's bootc; the Justfile passes $BOOTC_RPMS here.
+ARG bootc_rpms=scratch
+# Extra packages for the target root (a space-separated list).
+ARG extra_packages=""
+# Set to 1 to have `bootc install` pick the composefs backend from the image's
+# install configuration, which is how bootc-image-builder and Anaconda
+# installs get it, since they don't pass --composefs-backend. This needs a
+# bootc that knows the `composefs-backend` key
+# (https://github.com/bootc-dev/bootc/issues/2256); older ones reject it.
+ARG composefs_backend_config=0
+
+FROM ${bootc_rpms} AS bootc-rpms
+
+FROM ${base} AS builder
+# See ../sealing/Containerfile: a workaround for multi-block GPG keys (RHEL);
+# a no-op on CentOS Stream.
+RUN python3 - <<'EOF'
+import re, pathlib
+for key in pathlib.Path("/etc/pki/rpm-gpg").glob("RPM-GPG-KEY-*"):
+    blocks = re.findall(
+        r"-----BEGIN PGP PUBLIC KEY BLOCK-----.*?-----END PGP PUBLIC KEY BLOCK-----",
+        key.read_text(), re.DOTALL)
+    if len(blocks) < 2:
+        continue
+    for i, block in enumerate(blocks):
+        key.with_name(f"{key.name}-{i}").write_text(block + "\n")
+EOF
+# Declared here so that its value is part of the cache key of the RUN below:
+# buildah doesn't notice when a bind-mounted stage changes.
+ARG bootc_rpms
+ARG extra_packages
+RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
+    --mount=type=bind,from=bootc-rpms,target=/run/bootc-rpms <<EORUN
+set -xeuo pipefail
+# bootc RPMs from bootc_rpms, if any, take precedence over the distribution's.
+if test -d /run/bootc-rpms/repodata; then
+  cp /run/bootc-rpms/bootc-git.repo /etc/yum.repos.d/
+fi
+install_args=()
+for pkg in ${extra_packages}; do install_args+=(--install "${pkg}"); done
+/usr/libexec/bootc-base-imagectl build-rootfs "${install_args[@]}" --manifest=standard /target-rootfs
+rm -f /etc/yum.repos.d/bootc-git.repo
+EORUN
+
+FROM scratch
+COPY --from=builder /target-rootfs/ /
+ARG composefs_backend_config
+# composefs needs fs-verity, so the root filesystem is ext4 instead of xfs.
+RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp <<EORUN
+set -xeuo pipefail
+cat > /usr/lib/bootc/install/00-ext4-default.toml <<'EOF'
+[install.filesystem.root]
+type = "ext4"
+EOF
+if test "${composefs_backend_config}" = 1; then
+  cat > /usr/lib/bootc/install/10-composefs-backend.toml <<'EOF'
+[install]
+composefs-backend = true
+EOF
+fi
+EORUN
+RUN --network=none --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
+    bootc container lint --fatal-warnings
+LABEL containers.bootc 1
+ENV container=oci
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

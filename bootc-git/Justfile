@@ -1,0 +1,39 @@
+# Justfile for building bootc RPMs from git; see the Containerfile.
+
+# The bootc git commit to build, and the image to build it in (pinned by
+# digest, so that a given commit keeps building the same way). Override them
+# with BOOTC_GIT_COMMIT (and BOOTC_GIT_REPO for a fork) and BOOTC_BUILDROOT.
+commit := env("BOOTC_GIT_COMMIT", trim(read("commit")))
+repo := env("BOOTC_GIT_REPO", "https://github.com/bootc-dev/bootc")
+buildroot := env("BOOTC_BUILDROOT", trim(read("buildroot")))
+# The floating tag that `bump` resolves to a digest
+buildroot_tag := "quay.io/centos/centos:stream10"
+
+# Build the RPM image and print its name.
+build:
+    #!/bin/bash
+    set -euo pipefail
+    commit="{{commit}}"
+    # The commit may also be a ref (e.g. a branch of a fork); make it a valid tag.
+    tag=$(printf '%s' "${commit}" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)
+    img="localhost/bootc-rpms:${tag}"
+    # Falls back to the tag if the registry dropped the pinned digest
+    buildroot=$(./resolve-buildroot.py "{{buildroot}}")
+    podman build --build-arg buildroot="${buildroot}" \
+        --build-arg repo="{{repo}}" --build-arg commit="${commit}" -t "${img}" . >&2
+    echo "${img}"
+
+# Pin the commit to the head of the repository's default branch (bootc's
+# main, or with BOOTC_GIT_REPO, that fork's default branch), and the
+# buildroot to the current digest of its tag.
+bump:
+    #!/bin/bash
+    set -euo pipefail
+    commit=$(git ls-remote "{{repo}}" HEAD | cut -f1)
+    test -n "${commit}"
+    digest=$(skopeo inspect --raw "docker://{{buildroot_tag}}" | sha256sum | cut -d' ' -f1)
+    test -n "${digest}"
+    echo "${commit}" > commit
+    echo "{{buildroot_tag}}@sha256:${digest}" > buildroot
+    echo "bootc-git/commit: ${commit}"
+    echo "bootc-git/buildroot: $(cat buildroot)"
