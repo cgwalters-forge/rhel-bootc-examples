@@ -11,6 +11,14 @@
 # Local image name
 host_image := "localhost/sealed-host:latest"
 
+# What to build from: "rhel" (the default; needs a RHEL subscription and a
+# registry.redhat.io login) or "centos-stream" (CentOS Stream 10, no
+# subscription), e.g. `just base=centos-stream build`. BASE_IMAGE, if set,
+# overrides it with any image.
+base := "rhel"
+# Empty means the Containerfile's default, RHEL
+base_image := env("BASE_IMAGE", if base == "centos-stream" { "quay.io/centos-bootc/centos-bootc:stream10" } else { "" })
+
 # Key material directory (for local dev; CI uses secrets)
 keys_dir := justfile_directory() + "/target/keys"
 
@@ -27,11 +35,20 @@ keygen:
 # Build the sealed host image (composefs backend with signed UKI).
 # If no persistent key exists under target/keys/, an ephemeral key+cert pair
 # is generated automatically (suitable for CI and local smoke-testing).
+# See `base` above for building without a RHEL subscription.
 build:
     #!/bin/bash
     set -euo pipefail
     KEY="{{keys_dir}}/sb-db.key"
     CERT="keys/db.crt"
+    case "{{base}}" in
+        rhel|centos-stream) ;;
+        *) echo "error: unknown base '{{base}}' (use rhel or centos-stream)" >&2; exit 1 ;;
+    esac
+    build_args=()
+    if [ -n "{{base_image}}" ]; then
+        build_args+=(--build-arg "base={{base_image}}")
+    fi
 
     if [ ! -f "${KEY}" ]; then
         echo "No persistent key found — generating ephemeral key+cert for this build."
@@ -43,7 +60,7 @@ build:
 
     # build-rootfs runs `rpm-ostree compose` under bwrap, which needs extra
     # capabilities and /dev/fuse. The composefs/UKI build also uses fuse.
-    podman build \
+    podman build "${build_args[@]}" \
         --cap-add=all --security-opt=label=type:container_runtime_t --device /dev/fuse \
         --secret id=secureboot_key,src="${KEY}" \
         --secret id=secureboot_cert,src="${CERT}" \

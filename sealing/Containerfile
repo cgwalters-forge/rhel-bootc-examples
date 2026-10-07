@@ -38,6 +38,8 @@
 #     --secret id=secureboot_cert,src=keys/db.crt \
 #     -t localhost/sealed-host:latest .
 
+# quay.io/centos-bootc/centos-bootc:stream10 also works and needs no
+# subscription: `just base=centos-stream build` passes it here.
 ARG base=registry.redhat.io/rhel10/rhel-bootc:10.2
 # Extra packages to install into the sealed rootfs (space-separated).
 # Example: --build-arg extra_packages="cloud-init" for cloud images.
@@ -61,16 +63,19 @@ ARG extra_packages
 # Workaround for https://github.com/coreos/rpm-ostree/pull/5597 (libdnf only
 # reads the first armor block from a key file). RHEL 10's
 # RPM-GPG-KEY-redhat-release contains three blocks (RSA, Ed448, ML-DSA);
-# split them into individual files so rpm-ostree can import all of them.
+# split any such multi-block key into individual files so rpm-ostree can
+# import all of them. CentOS Stream ships one key per file, so this is a
+# no-op there.
 RUN python3 - <<'EOF'
 import re, pathlib
-gpgdir = pathlib.Path("/etc/pki/rpm-gpg")
-key = gpgdir / "RPM-GPG-KEY-redhat-release"
-blocks = re.findall(
-    r"-----BEGIN PGP PUBLIC KEY BLOCK-----.*?-----END PGP PUBLIC KEY BLOCK-----",
-    key.read_text(), re.DOTALL)
-for i, block in enumerate(blocks):
-    (gpgdir / f"RPM-GPG-KEY-redhat-release-{i}").write_text(block + "\n")
+for key in pathlib.Path("/etc/pki/rpm-gpg").glob("RPM-GPG-KEY-*"):
+    blocks = re.findall(
+        r"-----BEGIN PGP PUBLIC KEY BLOCK-----.*?-----END PGP PUBLIC KEY BLOCK-----",
+        key.read_text(), re.DOTALL)
+    if len(blocks) < 2:
+        continue
+    for i, block in enumerate(blocks):
+        key.with_name(f"{key.name}-{i}").write_text(block + "\n")
 EOF
 RUN --mount=type=tmpfs,target=/run --mount=type=tmpfs,target=/tmp \
     /usr/libexec/bootc-base-imagectl build-rootfs --manifest=standard \
@@ -119,8 +124,8 @@ set -xeuo pipefail
 # We will use systemd-boot, so remove bootupd and shim (not needed: we sign
 # and boot the UKI directly with our own Secure Boot key, no shim chain).
 rpm -e bootupd shim-x64
-# Import the Red Hat signing keys up front: offline, dnf can't fetch them itself.
-rpm --import /run/keys/RPM-GPG-KEY-redhat-*
+# Import the distribution's signing keys up front: offline, dnf can't fetch them itself.
+rpm --import /run/keys/RPM-GPG-KEY-*
 # localpkg_gpgcheck enforces signatures on the local rpms (dnf leaves it off).
 dnf -y install --disablerepo='*' --setopt=localpkg_gpgcheck=1 /run/rpms/*.rpm
 dnf clean all
