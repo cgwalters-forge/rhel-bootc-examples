@@ -1,0 +1,66 @@
+# Containerfile — bootc RPMs built from a git commit
+#
+# Produces an image that contains nothing but the bootc RPMs (at /), built
+# from one commit of https://github.com/bootc-dev/bootc the same way bootc's
+# own `just package` does: install the build dependencies with
+# contrib/packaging/install-buildroot, then contrib/packaging/build-rpm.
+# The version is derived from the commit like bootc's Justfile does
+# (<commit timestamp>.g<short sha>), so it sorts above any released bootc.
+#
+# The other examples take this image through their `bootc_rpms` build
+# argument and install the RPMs into their target root. See the Justfile
+# (`just bootc-rpms`); the commit is pinned in bootc-git/commit.
+#
+#   podman build --build-arg buildroot=$(cat buildroot) --build-arg commit=$(cat commit) \
+#     -t localhost/bootc-rpms:$(cat commit) .
+#
+# The buildroot is pinned by digest in bootc-git/buildroot, so that a pinned
+# commit keeps building the same way; `just bootc-git-bump` updates both.
+# quay.io/centos/centos:stream10 is rebuilt often, has no dated tags, and the
+# registry drops old digests within days; when the pinned one is gone, `just
+# bootc-rpms` warns and falls back to the tag rather than failing (see
+# resolve-buildroot.py).
+
+ARG buildroot=quay.io/centos/centos:stream10
+FROM ${buildroot} AS build
+ARG repo=https://github.com/bootc-dev/bootc
+ARG commit
+RUN --mount=type=tmpfs,target=/tmp <<EORUN
+set -xeuo pipefail
+test -n "${commit}" || { echo "error: pass --build-arg commit=<bootc git commit>" >&2; exit 1; }
+dnf -y install git-core
+git init -q /src
+git -C /src fetch -q --depth=1 "${repo}" "${commit}"
+git -C /src checkout -q FETCH_HEAD
+EORUN
+RUN --mount=type=tmpfs,target=/tmp /src/contrib/packaging/install-buildroot
+# Fetch the crates while we still have the network; the build itself runs offline.
+RUN --mount=type=tmpfs,target=/tmp cd /src && cargo fetch
+RUN --network=none --mount=type=tmpfs,target=/tmp <<EORUN
+set -xeuo pipefail
+cd /src
+ts=$(git show -s --format=%ct HEAD)
+export SOURCE_DATE_EPOCH=${ts}
+export RPM_VERSION="$(date -u -d "@${ts}" +%Y%m%d%H%M).g$(git rev-parse --short=10 HEAD)"
+contrib/packaging/build-rpm /out /src
+EORUN
+# Make /out a dnf repository that consumers bind-mount at /run/bootc-rpms
+# and enable with the .repo file. Its priority makes dnf and
+# bootc-base-imagectl prefer these RPMs over the distribution's bootc.
+RUN --mount=type=tmpfs,target=/tmp <<EORUN
+set -xeuo pipefail
+dnf -y install createrepo_c
+createrepo_c /out
+cat > /out/bootc-git.repo <<'EOF'
+[bootc-git]
+name=bootc built from git
+baseurl=file:///run/bootc-rpms
+enabled=1
+gpgcheck=0
+priority=1
+EOF
+ls -l /out
+EORUN
+
+FROM scratch
+COPY --from=build /out/ /

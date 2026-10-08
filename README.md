@@ -81,6 +81,17 @@ currently remain on `rhel9/rhel-bootc:9.4` pending RHEL 10 package availability.
   signed Unified Kernel Image embeds the composefs digest of the root filesystem.
   UEFI Secure Boot verifies the UKI, which in turn verifies every file on the
   root via fs-verity. *Note: experimental.*
+- [composefs](composefs) - The bootc composefs backend without sealing: a
+  regular boot chain, with deployments stored in composefs. *Note: experimental.*
+
+The composefs examples can be built with bootc from git, to try unreleased
+changes: see [bootc-git](bootc-git/Containerfile), and `just e2e sealed` or
+`just e2e unsealed` for an end-to-end test on CentOS Stream 10 that builds a
+disk image with image-builder, boots it, and upgrades it. The bootc commit
+and the image it's compiled in are pinned (see `just bootc-git-bump`; when
+the registry has dropped the pinned image, the build warns and uses its tag), but
+the base images of the examples are not, on purpose: a weekly CI job builds
+them with bootc from git to catch breakage from new CentOS Stream content.
 
 ## More examples
 

@@ -36,7 +36,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Secrets are not passed to workflows triggered by PRs from forks.
+      # Rather than failing, build against CentOS Stream there: that still
+      # exercises the whole Containerfile.
+      - name: Check for RHEL subscription secrets
+        id: rhel
+        env:
+          RHT_ACT_KEY: ${{ secrets.RHT_ACT_KEY }}
+          SOURCE_REGISTRY_USER: ${{ secrets.SOURCE_REGISTRY_USER }}
+        run: |
+          if [ -n "${RHT_ACT_KEY}" ] && [ -n "${SOURCE_REGISTRY_USER}" ]; then
+            echo "available=true" >> "${GITHUB_OUTPUT}"
+            echo "base=rhel" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::notice::RHEL subscription secrets are unavailable (e.g. a PR from a fork); building against CentOS Stream instead"
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "base=centos-stream" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Register subscription
+        if: steps.rhel.outputs.available == 'true'
         run: subscription-manager register --org=${{ secrets.RHT_ORGID }} --activationkey=${{ secrets.RHT_ACT_KEY }}
 
       - name: Install build tools
@@ -45,34 +64,40 @@ jobs:
           dnf -y install podman just openssl
 
       - name: Log in to registry.redhat.io
+        if: steps.rhel.outputs.available == 'true'
         env:
           SOURCE_REGISTRY_USER: ${{ secrets.SOURCE_REGISTRY_USER }}
           SOURCE_REGISTRY_PASSWORD: ${{ secrets.SOURCE_REGISTRY_PASSWORD }}
         run: echo "${SOURCE_REGISTRY_PASSWORD}" | podman login registry.redhat.io -u "${SOURCE_REGISTRY_USER}" --password-stdin
 
-      # For push builds with a real key, place it where the Justfile expects it.
-      # For PRs (no secret) the Justfile generates an ephemeral key+cert itself.
-      - name: Write db private key (push builds only)
-        if: env.SECUREBOOT_DB_KEY != ''
+      # For non-PR builds with a real key, place it where the Justfile expects
+      # it. Otherwise the Justfile generates an ephemeral key+cert itself.
+      # (A step's `if:` can't see its own `env:`, so the check is in the script.)
+      - name: Write db private key (non-PR builds only)
+        if: github.event_name != 'pull_request'
         env:
           SECUREBOOT_DB_KEY: ${{ secrets.SECUREBOOT_DB_KEY }}
         run: |
-          mkdir -p target/keys
-          printenv SECUREBOOT_DB_KEY > target/keys/sb-db.key
+          if [ -z "${SECUREBOOT_DB_KEY}" ]; then
+            echo "SECUREBOOT_DB_KEY is not set; building with an ephemeral key"
+          else
+            mkdir -p target/keys
+            printenv SECUREBOOT_DB_KEY > target/keys/sb-db.key
+          fi
 
       - name: Build sealed host image
-        run: just build
+        run: just base=${{ steps.rhel.outputs.base }} build
 
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rhel.outputs.available == 'true'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Push host image to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rhel.outputs.available == 'true'
         run: podman push localhost/sealed-host:latest docker://${HOST_IMAGE}:latest
 
       - name: Unregister subscription
-        if: always()
+        if: always() && steps.rhel.outputs.available == 'true'
         run: subscription-manager unregister
 
       - name: Clean up keys
